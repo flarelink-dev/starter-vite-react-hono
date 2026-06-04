@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "flarelink-starter",
+  "main": "./server/index.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./dist/client",
+    "not_found_handling": "single-page-application",
+    // CF asset binding is greedy by default — for /api/* it would fall through
+    // to index.html (SPA shell) and edge-cache that response under a path-only
+    // key. That's catastrophic for auth (caches a different user's response
+    // for everyone else hitting the same path). Force the Worker first for
+    // the entire API surface.
+    "run_worker_first": ["/api/*"]
+  },
+  // FLARELINK_URL + FLARELINK_SERVICE_KEY come in via .dev.vars locally and
+  // `wrangler secret put` in production. Do NOT commit FLARELINK_SERVICE_KEY
+  // here — it's the gate for all server-side Flarelink calls.
+  "observability": {
+    "enabled": true
+  }
+}

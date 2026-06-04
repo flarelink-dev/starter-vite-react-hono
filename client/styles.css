@@ -1,0 +1,5 @@
+@import "tailwindcss";
+
+/* No custom config file — Tailwind v4 reads inline @theme directives.
+ * Add any token overrides here if you customise.
+ */
