@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
-import { Link, Navigate } from 'react-router';
+import { Link, Navigate, useNavigate } from 'react-router';
 import { flarelink } from '../lib/flarelink.ts';
-import { useSession } from '../lib/session.ts';
+import { refreshSession, useSession } from '../lib/session.ts';
 
 export function Signup() {
   const session = useSession();
@@ -11,6 +11,7 @@ export function Signup() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
+  const navigate = useNavigate();
 
   if (session.status === 'signed-in') return <Navigate to="/" replace />;
 
@@ -19,16 +20,26 @@ export function Signup() {
     setError(null);
     setBusy(true);
     try {
-      // If your Flarelink auth Worker has email verification on (default),
-      // the user lands here in "check your email" state. If verification
-      // is off, autoSignInAfterVerification kicks in and they're signed
-      // in immediately — useSession() will pick it up.
       await flarelink.auth.signUp({
         email,
         password,
         name: name.trim() || (email.split('@')[0] ?? 'there'),
       });
-      setSent(true);
+      // Branch on whether the auth Worker auto-signed us in. Two cases:
+      //  - Email verification ON (or email module configured + toggle on):
+      //    no session yet, user has to click the link in their inbox →
+      //    show the "check your email" pane.
+      //  - Email verification OFF (the default for fresh projects that
+      //    haven't configured email): BetterAuth signs the user in
+      //    immediately, cookie is set, we navigate to /.
+      const me = await refreshSession()
+        .then(() => flarelink.auth.getMe())
+        .catch(() => null);
+      if (me) {
+        navigate('/');
+      } else {
+        setSent(true);
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {

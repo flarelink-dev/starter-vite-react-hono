@@ -33,15 +33,24 @@ type AppEnv = { Bindings: Bindings; Variables: Vars };
 const app = new Hono<AppEnv>();
 
 // ---- 1. Auth proxy --------------------------------------------------
-// Reverse-proxy /api/auth/* to the auth Worker. Browser sees same-origin
-// (cookies set on this Worker's domain) so server routes here can read the
-// session cookie via flarelink.auth.getSession({ headers: req.headers }).
+// Reverse-proxy auth-Worker endpoints so the browser sees same-origin
+// (cookies set on this Worker's domain) and server routes here can read
+// the session cookie via the SDK's `cookies` option.
+//
+// Three path prefixes need to be proxied because the browser SDK touches
+// all three:
+//   - /api/auth/*       BetterAuth's signup / signin / signout / verify-email / ...
+//   - /api/me           the SDK's getMe() / getSession() target
+//   - /__flarelink/*    Worker version + config inspection endpoints
+//
+// Anything else falls through to /api/notes / /api/attachments (our own
+// routes) or the ASSETS binding (the SPA).
 //
 // Make sure your Flarelink auth Worker's `trustedOrigins` (configurable on
 // Authentication → Settings → Trusted origins) includes this Worker's URL
 // (and http://localhost:5174 for dev). Otherwise BetterAuth refuses the
 // cross-origin POST.
-app.all('/api/auth/*', async (c) => {
+async function proxyToAuthWorker(c: Context<AppEnv>): Promise<Response> {
   const incoming = new URL(c.req.url);
   const upstream = new URL(c.env.FLARELINK_URL);
   // Preserve the path + query — only the host swaps.
@@ -60,7 +69,11 @@ app.all('/api/auth/*', async (c) => {
         : c.req.raw.body,
     redirect: 'manual',
   });
-});
+}
+
+app.all('/api/auth/*', proxyToAuthWorker);
+app.all('/api/me', proxyToAuthWorker);
+app.all('/__flarelink/*', proxyToAuthWorker);
 
 // ---- Server-side SDK factory + session middleware -------------------
 //

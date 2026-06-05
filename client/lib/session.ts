@@ -53,10 +53,15 @@ async function loadOnce() {
 }
 
 /** Force a refresh — call after sign-in / sign-up / sign-out so the cache
- *  reflects the new state immediately rather than waiting on next mount. */
-export function refreshSession() {
+ *  reflects the new state immediately rather than waiting on next mount.
+ *
+ *  Returns a promise that resolves once the new getMe() lands. Await this
+ *  before navigating: otherwise navigate() fires while cache is still the
+ *  pre-signin state, RequireAuth bounces back to /login, and (in StrictMode)
+ *  the subscriber may already be torn down by the time setState lands. */
+export function refreshSession(): Promise<void> {
   loading = null;
-  void loadOnce();
+  return loadOnce();
 }
 
 export function useSession(): SessionState {

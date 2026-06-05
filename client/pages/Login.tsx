@@ -19,7 +19,10 @@ export function Login() {
     setBusy(true);
     try {
       await flarelink.auth.signIn({ email, password });
-      refreshSession();
+      // Await the refresh so cache is signed-in BEFORE we navigate —
+      // otherwise RequireAuth on / sees the pre-signin cache and bounces
+      // back to /login.
+      await refreshSession();
       navigate('/');
     } catch (err) {
       // BetterAuth's EMAIL_NOT_VERIFIED auto-resends the verification
