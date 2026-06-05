@@ -32,15 +32,15 @@ async function loadOnce() {
   if (loading) return loading;
   loading = (async () => {
     try {
-      const session = await flarelink.auth.getSession();
-      if (session?.user) {
+      // getMe() returns the User (id / email / name / …) or null when
+      // signed out. The cousin getSession() returns just the Session row
+      // (id / userId / expiresAt / …) — no email / name on it, so getMe
+      // is the right call for "give me the user object".
+      const user = await flarelink.auth.getMe();
+      if (user) {
         set({
           status: 'signed-in',
-          user: {
-            id: session.user.id,
-            email: session.user.email,
-            name: session.user.name ?? null,
-          },
+          user: { id: user.id, email: user.email, name: user.name ?? null },
         });
       } else {
         set({ status: 'signed-out' });

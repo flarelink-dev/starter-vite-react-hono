@@ -13,7 +13,7 @@
     "db:migrate:remote": "dotenv -e .dev.vars -- wrangler d1 migrations apply notes --remote"
   },
   "dependencies": {
-    "@flarelink/client": "^0.2.0",
+    "@flarelink/client": "^0.2.3",
     "hono": "^4.6.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

@@ -32,7 +32,7 @@ export function Notes() {
     setError(null);
     try {
       const r = await fetch('/api/notes', { credentials: 'include' });
-      if (!r.ok) throw new Error((await r.json()).error ?? r.statusText);
+      if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? r.statusText);
       const data = (await r.json()) as { notes: Note[] };
       setNotes(data.notes);
     } catch (e) {
@@ -62,16 +62,21 @@ export function Notes() {
           credentials: 'include',
           body: JSON.stringify({ filename: file.name, contentType: file.type }),
         });
-        if (!r.ok) throw new Error((await r.json()).error ?? r.statusText);
-        const { url, key } = (await r.json()) as { url: string; key: string };
+        if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? r.statusText);
+        const { url, signedHeaders, key } = (await r.json()) as {
+          url: string;
+          signedHeaders: Record<string, string>;
+          key: string;
+        };
 
         // 2. Browser PUTs the bytes directly to R2 — zero egress, zero
-        //    bytes through this Worker. Content-Type MUST match what was
-        //    sent at signing time (it's included in SignedHeaders).
+        //    bytes through this Worker. Send EXACTLY the signedHeaders the
+        //    server returned (typically `content-type`). Adding or
+        //    omitting headers breaks the SigV4 signature → 403.
         const put = await fetch(url, {
           method: 'PUT',
           body: file,
-          headers: { 'Content-Type': file.type || 'application/octet-stream' },
+          headers: signedHeaders,
         });
         if (!put.ok) throw new Error(`R2 upload failed (${put.status})`);
         attachmentKey = key;
@@ -84,7 +89,7 @@ export function Notes() {
         credentials: 'include',
         body: JSON.stringify({ content: draft.trim(), attachmentKey }),
       });
-      if (!r.ok) throw new Error((await r.json()).error ?? r.statusText);
+      if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? r.statusText);
 
       setDraft('');
       setFile(null);
@@ -104,7 +109,7 @@ export function Notes() {
         method: 'DELETE',
         credentials: 'include',
       });
-      if (!r.ok) throw new Error((await r.json()).error ?? r.statusText);
+      if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? r.statusText);
       await load();
     } catch (e) {
       setError((e as Error).message);

@@ -26,7 +26,7 @@ export function Signup() {
       await flarelink.auth.signUp({
         email,
         password,
-        name: name.trim() || email.split('@')[0] ?? 'there',
+        name: name.trim() || (email.split('@')[0] ?? 'there'),
       });
       setSent(true);
     } catch (err) {

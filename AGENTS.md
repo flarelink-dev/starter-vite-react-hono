@@ -59,8 +59,11 @@ forwards `/api/auth/*` to the auth Worker so the session cookie lands
 on this Worker's domain (same-origin auth).
 
 - ✅ Browser: `flarelink.auth.signIn({ email, password })` → goes to `/api/auth/sign-in/email` on this Worker → proxied
-- ✅ Server: `flarelink.auth.getSession({ headers: c.req.raw.headers })` reads the cookie that was set on this Worker's domain
+- ✅ Server: pass the incoming Cookie at construction via
+  `createFlarelink({ url, serviceKey, cookies: () => c.req.raw.headers.get('cookie') ?? '' })`,
+  then `await flarelink.auth.getMe()` returns the `User` (or `null`)
 - ❌ Don't bypass the proxy and call the auth Worker URL directly from the browser — cookies won't survive
+- ❌ `flarelink.auth.getSession()` takes NO arguments — it always reads the cookie configured at construction time. Don't try to pass headers per-call.
 
 ### 4. Identifier safety: table + column names match `/^[A-Za-z_][A-Za-z0-9_]*$/`.
 
@@ -92,66 +95,90 @@ cross-DB joins needed).
 import { createFlarelink } from '@flarelink/client';
 const flarelink = createFlarelink({ url: import.meta.env.VITE_FLARELINK_URL });
 
-// Auth
-await flarelink.auth.signUp({ email, password, name });
-await flarelink.auth.signIn({ email, password });
-await flarelink.auth.signInWithSocial('google' | 'github', { callbackURL });
-await flarelink.auth.signInWithMagicLink({ email, callbackURL });
-await flarelink.auth.signOut();
-await flarelink.auth.getSession();
-await flarelink.auth.requestPasswordReset({ email, redirectTo });
-await flarelink.auth.resetPassword({ token, newPassword });
+// Auth — see types.ts for full input shapes.
+// Returned `User` has: id, email, name, emailVerified, image, createdAt, updatedAt.
+// Returned `Session` has: id, userId, expiresAt, createdAt, updatedAt, ipAddress?, userAgent?.
+//   (Session does NOT carry a nested user object — use getMe() to get the user.)
+
+await flarelink.auth.signUp({ email, password, name });           // → { user: User }
+await flarelink.auth.signIn({ email, password });                 // → { user: User }
+await flarelink.auth.signInWithSocial('google', { callbackURL }); // → { url } (navigates by default)
+await flarelink.auth.signInWithMagicLink(email, { callbackURL }); // first arg is the email string, NOT an object
+await flarelink.auth.signOut();                                   // → void
+await flarelink.auth.getMe();                                     // → User | null
+await flarelink.auth.getSession();                                // → Session | null (no args)
+await flarelink.auth.requestPasswordReset({ email, redirectTo }); // → { status: true }
+await flarelink.auth.resetPassword({ token, newPassword });       // → { status: true }
 await flarelink.auth.sendVerificationEmail({ email, callbackURL });
 ```
 
 ### Server-only (serviceKey required, lives in `c.env.FLARELINK_SERVICE_KEY`)
 
+Construct the SDK **per request** when you need a session — `cookies` is
+captured at construction time, not per-call. Reuse the same instance
+across requests only when you don't need a session (e.g. public stats).
+See [server/index.ts](server/index.ts) for the `server(c)` helper that
+does this.
+
 ```ts
 const flarelink = createFlarelink({
   url: c.env.FLARELINK_URL,
   serviceKey: c.env.FLARELINK_SERVICE_KEY,
+  // Forward the inbound request's Cookie header to the auth Worker so
+  // getMe() / getSession() can resolve. Omit when calling unauthenticated
+  // endpoints (sql / from / storage with serviceKey alone).
+  cookies: () => c.req.raw.headers.get('cookie') ?? '',
 });
 
-// Tagged-template SQL — values bind safely as numbered params
-const { results, meta } = await flarelink.sql`
+// Server-side session check — call getMe() to get the User (including email
+// + name). getSession() returns only the Session row (id / userId / expiresAt).
+const me = await flarelink.auth.getMe();
+if (!me) return c.json({ error: 'sign in required' }, 401);
+
+// Tagged-template SQL — values bind safely as numbered params.
+// IMPORTANT: returned shape is { rows, meta } — not { results }. The wire
+// format uses `results`, but the SDK renames it to `rows` for consistency
+// with the builder.
+const { rows, meta } = await flarelink.sql<{ id: string; content: string }>`
   SELECT id, content FROM notes
-  WHERE user_id = ${userId}
+  WHERE user_id = ${me.id}
   ORDER BY created_at DESC
   LIMIT ${limit}
 `;
 
-// Chainable builder — equality + AND only. For OR / IN / joins use sql tagged template.
+// Chainable builder — equality + AND only. For OR / IN / joins / >, < use the sql tagged template.
+// .select takes either '*' (default), an array of column names, or call without args (defaults to '*').
 await flarelink.from('notes')
-  .select('id', 'content', 'created_at')
-  .where({ user_id: userId, archived: false })
+  .select(['id', 'content', 'created_at'])
+  .where({ user_id: me.id, archived: false })
   .orderBy('created_at', 'desc')
   .limit(50);
 
 await flarelink.from('notes')
-  .insert({ id: crypto.randomUUID(), user_id: userId, content })
+  .insert({ id: crypto.randomUUID(), user_id: me.id, content })
   .returning('*');
 
 await flarelink.from('notes')
   .update({ content })
-  .where({ id: noteId, user_id: userId })
+  .where({ id: noteId, user_id: me.id })
   .returning('*');
 
 await flarelink.from('notes')
   .delete()
-  .where({ id: noteId, user_id: userId });
+  .where({ id: noteId, user_id: me.id });
 
-// Server-side session check (uses the cookie proxied from /api/auth/*)
-const session = await flarelink.auth.getSession({ headers: c.req.raw.headers });
-
-// Storage (presigned URLs — browser PUTs/GETs directly to R2)
-const url = await flarelink.storage.from('attachments')
+// Storage — presigned URLs. createSignedUploadUrl returns BOTH the URL
+// and `signedHeaders` you MUST send on the browser's PUT (or the
+// SigV4 signature won't match). Don't add extra headers to the PUT.
+const { url, signedHeaders } = await flarelink.storage.from('attachments')
   .createSignedUploadUrl(key, { contentType, expiresIn: 600 });
 
-const url = await flarelink.storage.from('attachments')
+const { url: downloadUrl } = await flarelink.storage.from('attachments')
   .createSignedDownloadUrl(key, { expiresIn: 600 });
 
 await flarelink.storage.from('attachments').remove([key1, key2]);
 await flarelink.storage.from('attachments').list({ prefix: 'notes/', cursor });
+await flarelink.storage.listBuckets();
 ```
 
 ## Where to add things
@@ -171,9 +198,15 @@ await flarelink.storage.from('attachments').list({ prefix: 'notes/', cursor });
 
 ### Pattern: protected mutation with user scoping
 
+`server(c)` is the per-request SDK helper in [server/index.ts](server/index.ts)
+that constructs `createFlarelink({ url, serviceKey, cookies: ... })` with
+the inbound request's Cookie header. Don't try to share an SDK instance
+across requests when you need a session — cookies are captured at
+construction.
+
 ```ts
 app.post('/api/my-things', requireUser, async (c) => {
-  const flarelink = server(c.env);
+  const flarelink = server(c);
   const body = await c.req.json<{ name?: string }>();
   const name = body.name?.trim();
   if (!name) return c.json({ error: 'name required' }, 400);
@@ -189,27 +222,30 @@ app.post('/api/my-things', requireUser, async (c) => {
 
 ### Pattern: direct browser → R2 upload via presigned URL
 
-Server route mints the URL, browser PUTs. Zero bytes through the
-Worker. **Content-Type at PUT time must match the contentType passed
-at sign time** (it's in the SignedHeaders).
+Server route mints the URL + `signedHeaders`, browser PUTs with EXACTLY
+those headers. Zero bytes through the Worker. The signedHeaders include
+the bound `content-type` — adding extra headers (or omitting these) breaks
+the SigV4 signature.
 
 ```ts
 // server
 app.post('/api/uploads', requireUser, async (c) => {
+  const flarelink = server(c);
   const { filename, contentType } = await c.req.json();
   const key = `mythings/${c.var.user.id}/${Date.now()}-${filename}`;
-  const url = await flarelink.storage
+  const { url, signedHeaders } = await flarelink.storage
     .from('attachments')
     .createSignedUploadUrl(key, { contentType, expiresIn: 600 });
-  return c.json({ url, key });
+  return c.json({ url, signedHeaders, key });
 });
 
 // client
-const { url, key } = await fetch('/api/uploads', { ... });
+const r = await fetch('/api/uploads', { ... });
+const { url, signedHeaders, key } = await r.json();
 await fetch(url, {
   method: 'PUT',
   body: file,
-  headers: { 'Content-Type': file.type }, // MUST match
+  headers: signedHeaders, // use exactly what the server returned — don't add Content-Type yourself
 });
 ```
 

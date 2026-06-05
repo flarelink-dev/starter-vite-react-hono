@@ -11,7 +11,7 @@
 //      clause enforces per-user isolation.
 //   3. Static SPA via the ASSETS binding for everything else.
 
-import { Hono } from 'hono';
+import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { createFlarelink, AuthError, DatabaseError } from '@flarelink/client';
 
 type Bindings = {
@@ -28,7 +28,9 @@ type Vars = {
   user: { id: string; email: string; name: string | null };
 };
 
-const app = new Hono<{ Bindings: Bindings; Variables: Vars }>();
+type AppEnv = { Bindings: Bindings; Variables: Vars };
+
+const app = new Hono<AppEnv>();
 
 // ---- 1. Auth proxy --------------------------------------------------
 // Reverse-proxy /api/auth/* to the auth Worker. Browser sees same-origin
@@ -61,30 +63,36 @@ app.all('/api/auth/*', async (c) => {
 });
 
 // ---- Server-side SDK factory + session middleware -------------------
-function server(env: Bindings) {
+//
+// IMPORTANT: construct per-request when you need a session — the SDK
+// captures `cookies` at construction time, not per-call. Forwarding the
+// inbound Cookie header is what lets `flarelink.auth.getMe()` resolve
+// the user from a server context. (In the browser, the SDK ignores
+// `cookies` because the fetch already forwards credentials automatically.)
+function server(c: Context<AppEnv>) {
   return createFlarelink({
-    url: env.FLARELINK_URL,
-    serviceKey: env.FLARELINK_SERVICE_KEY,
+    url: c.env.FLARELINK_URL,
+    serviceKey: c.env.FLARELINK_SERVICE_KEY,
+    // Forward the inbound request's Cookie header on every outbound call
+    // so the auth Worker can resolve the user via getMe() / getSession().
+    // No effect in the browser (cookies flow via credentials: 'include').
+    cookies: () => c.req.raw.headers.get('cookie') ?? '',
   });
 }
 
 // requireUser: 401 if no session, otherwise populates c.var.user.
-const requireUser = async (
-  c: Parameters<Parameters<typeof app.use>[1]>[0],
-  next: () => Promise<void>,
-) => {
+const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
   try {
-    const flarelink = server(c.env);
-    const session = await flarelink.auth.getSession({
-      headers: c.req.raw.headers,
-    });
-    if (!session?.user) {
-      return c.json({ error: 'sign in required' }, 401);
-    }
+    const flarelink = server(c);
+    // getMe returns User | null (with id / email / name / etc.).
+    // getSession returns Session | null (id / userId / expiresAt / …) — no
+    // user fields, so use getMe when you want email + name in one hit.
+    const me = await flarelink.auth.getMe();
+    if (!me) return c.json({ error: 'sign in required' }, 401);
     c.set('user', {
-      id: session.user.id,
-      email: session.user.email,
-      name: session.user.name ?? null,
+      id: me.id,
+      email: me.email,
+      name: me.name ?? null,
     });
     await next();
   } catch (err) {
@@ -98,17 +106,20 @@ const requireUser = async (
 // ---- 2. Notes endpoints ---------------------------------------------
 
 app.get('/api/notes', requireUser, async (c) => {
-  const flarelink = server(c.env);
+  const flarelink = server(c);
   const user = c.var.user;
   try {
-    const { results } = await flarelink.sql`
+    // SDK returns `{ rows, meta }` — rows[] is the row list. (The wire
+    // format uses `results`; the SDK renames to keep terminology aligned
+    // with the chainable builder.)
+    const { rows } = await flarelink.sql`
       SELECT id, content, attachment_key, created_at
       FROM notes
       WHERE user_id = ${user.id}
       ORDER BY created_at DESC
       LIMIT 100
     `;
-    return c.json({ notes: results });
+    return c.json({ notes: rows });
   } catch (err) {
     if (err instanceof DatabaseError) {
       return c.json({ error: err.message, code: err.code }, 500);
@@ -118,7 +129,7 @@ app.get('/api/notes', requireUser, async (c) => {
 });
 
 app.post('/api/notes', requireUser, async (c) => {
-  const flarelink = server(c.env);
+  const flarelink = server(c);
   const user = c.var.user;
   const body = await c.req.json<{ content?: string; attachmentKey?: string | null }>();
   const content = body.content?.trim();
@@ -134,7 +145,7 @@ app.post('/api/notes', requireUser, async (c) => {
 });
 
 app.delete('/api/notes/:id', requireUser, async (c) => {
-  const flarelink = server(c.env);
+  const flarelink = server(c);
   const user = c.var.user;
   const id = c.req.param('id');
   // WHERE user_id = ? prevents one user from deleting another's note
@@ -142,14 +153,14 @@ app.delete('/api/notes/:id', requireUser, async (c) => {
   const result = await flarelink.sql`
     DELETE FROM notes WHERE id = ${id} AND user_id = ${user.id}
   `;
-  return c.json({ deleted: result.meta?.changes ?? 0 });
+  return c.json({ deleted: result.meta.changes ?? 0 });
 });
 
 // Mint a presigned PUT URL for an attachment. Browser uploads directly to
 // R2 — Flarelink never sees the bytes. Key is namespaced under the
 // user's id so customers can't collide / overwrite each other.
 app.post('/api/attachments/upload-url', requireUser, async (c) => {
-  const flarelink = server(c.env);
+  const flarelink = server(c);
   const user = c.var.user;
   const body = await c.req.json<{ filename?: string; contentType?: string }>();
   const filename = body.filename?.trim();
@@ -163,15 +174,20 @@ app.post('/api/attachments/upload-url', requireUser, async (c) => {
   // from the Flarelink dashboard's R2 / Files page before first use, OR
   // create it via `wrangler r2 bucket create attachments` if you have
   // direct CLI access.
-  const url = await flarelink.storage
+  //
+  // Returns BOTH the presigned URL AND the headers the browser must send
+  // on the PUT. The signature is bound to those headers — adding extra
+  // headers (or omitting these) makes R2 reject the upload with
+  // SignatureDoesNotMatch.
+  const { url, signedHeaders } = await flarelink.storage
     .from('attachments')
     .createSignedUploadUrl(key, { contentType, expiresIn: 600 });
-  return c.json({ url, key, contentType });
+  return c.json({ url, signedHeaders, key });
 });
 
 // Mint a presigned GET URL so the browser can render attachments.
 app.get('/api/attachments/download-url', requireUser, async (c) => {
-  const flarelink = server(c.env);
+  const flarelink = server(c);
   const user = c.var.user;
   const key = c.req.query('key');
   if (!key) return c.json({ error: 'key required' }, 400);
@@ -179,7 +195,7 @@ app.get('/api/attachments/download-url', requireUser, async (c) => {
   if (!key.startsWith(`notes/${user.id}/`)) {
     return c.json({ error: 'forbidden' }, 403);
   }
-  const url = await flarelink.storage
+  const { url } = await flarelink.storage
     .from('attachments')
     .createSignedDownloadUrl(key, { expiresIn: 600 });
   return c.json({ url });
