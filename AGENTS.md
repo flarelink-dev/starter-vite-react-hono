@@ -273,8 +273,14 @@ await fetch(url, {
 
 - **"sign in required" on every server call** → Trusted origins. Check
   the Flarelink dashboard's Authentication → Settings → Trusted origins
-  includes BOTH `http://localhost:5174` (dev) AND your deployed Worker
+  includes BOTH `https://localhost:5175` (dev) AND your deployed Worker
   URL (prod).
+- **Signed in, then immediately signed out (esp. Safari/iOS)** → The
+  session cookie is `Secure`; it won't store over plain `http://localhost`.
+  Dev must run over HTTPS (`https://localhost:5175` via vite-plugin-mkcert,
+  already wired in `vite.config.ts`). In prod, the auth Worker must be on
+  the same site as the app (custom domain on your app's domain) — a
+  `*.workers.dev` auth URL is cross-site and Safari blocks its cookie.
 - **CORS error on PUT to R2** → Bucket's CORS rule doesn't include this
   app's origin. Click "fix cors" on the Files page in the Flarelink
   dashboard, or re-create the bucket (it auto-applies CORS for the

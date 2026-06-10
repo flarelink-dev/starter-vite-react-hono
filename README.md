@@ -41,7 +41,7 @@ npm install
 
 # 2. Browser env (Vite reads .env at dev + build)
 cp .env.example .env
-# Set VITE_FLARELINK_URL=http://localhost:5174 (default is fine for dev)
+# Set VITE_FLARELINK_URL=https://localhost:5175 (default is fine for dev)
 
 # 3. Server env (Wrangler reads .dev.vars locally; gitignored)
 cat > .dev.vars <<EOF
@@ -55,10 +55,18 @@ npm run db:migrate:remote   # do this once, before you deploy
 
 # 5. Run it
 npm run dev
-# → http://localhost:5174
+# → https://localhost:5175
+# (first run installs a local HTTPS cert via mkcert — may prompt once)
 ```
 
 Sign up, click the verification link, write a note, attach a file. Done.
+
+> **Why HTTPS in dev?** The auth session cookie is `Secure` (and uses the
+> `__Secure-` name prefix), which Safari and iOS refuse to store over plain
+> `http://localhost`. The starter serves dev over `https://localhost:5175`
+> via [vite-plugin-mkcert](https://github.com/liuweiGL/vite-plugin-mkcert) so
+> sign-in works in every browser. First run installs a locally-trusted CA
+> into your system keychain.
 
 ## Trusted origins
 
@@ -66,7 +74,7 @@ Flarelink's auth Worker only accepts requests from origins listed in its
 `trustedOrigins` config. **You must add this app's origin** to that list
 or BetterAuth will refuse cross-origin POSTs.
 
-- **Dev:** `http://localhost:5174`
+- **Dev:** `https://localhost:5175` (https, not http — see "Why HTTPS in dev?" above)
 - **Prod:** `https://your-deployed-worker.your-subdomain.workers.dev`
 
 Set both at [Authentication → Settings → Trusted origins](https://dash.flarelink.dev)
@@ -124,6 +132,12 @@ this Worker's domain, so `flarelink.auth.getSession({ headers })` here
 would never see it). By proxying `/api/auth/*` to the auth Worker, the
 cookie lands on **this** Worker's domain — and server routes can read
 it freely, validate the session, and scope queries to the current user.
+
+The proxy makes the cookie *first-party* but doesn't change its
+attributes — it's still `Secure`. So the app must be served over HTTPS
+for the browser to store it: `https://localhost:5175` in dev (handled by
+vite-plugin-mkcert), and HTTPS in prod (every deployment already is).
+Plain `http://localhost` silently drops the cookie in Safari.
 
 ## Extending
 
