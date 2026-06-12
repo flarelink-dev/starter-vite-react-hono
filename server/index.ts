@@ -214,6 +214,12 @@ app.get('/api/attachments/download-url', requireUser, async (c) => {
   return c.json({ url });
 });
 
+// Any unmatched /api/* path is a 404 — return JSON, not the SPA shell.
+// Without this it falls through to the ASSETS catchall below and bots
+// probing /api/.env, /api/env, etc. get served index.html (HTML for an
+// API path). Keep this above the catchall.
+app.all('/api/*', (c) => c.json({ error: 'not found' }, 404));
+
 // ---- 3. SPA fallback ------------------------------------------------
 // Everything that didn't match above hands to the assets binding, which
 // serves the built Vite SPA + falls back to index.html for client-side
